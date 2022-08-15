@@ -80,8 +80,8 @@ class DiscordAuth implements AuthProvider {
 			$userArray = $user->toArray();
 
 			return [
-				'name' => $userArray['username'] . '-' . $user->getId(),
-				'realname' => $userArray['name'],
+				'name' => $user->getId(),
+				'realname' => $userArray['username'],
 				'email' => $userArray['email']
 			];
 		} catch ( \Exception $e ) {
