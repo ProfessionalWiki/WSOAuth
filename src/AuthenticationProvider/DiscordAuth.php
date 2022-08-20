@@ -45,7 +45,8 @@ class DiscordAuth implements AuthProvider {
 	 */
 	public function login( ?string &$key, ?string &$secret, ?string &$authUrl ): bool {
 		$authUrl = $this->provider->getAuthorizationUrl( [
-			'scope' => [ 'identify', 'email' ]
+			'scope' => [ 'identify', 'email' ],
+			'prompt' => 'none'
 		] );
 
 		$secret = $this->provider->getState();
