@@ -16,8 +16,11 @@
 
 namespace WSOAuth\AuthenticationProvider;
 
+use League\OAuth2\Client\Provider\AbstractProvider;
+use League\OAuth2\Client\Token\AccessToken;
 use MediaWiki\User\UserIdentity;
 use Wohali\OAuth2\Client\Provider\Discord;
+use Wohali\OAuth2\Client\Provider\DiscordResourceOwner;
 
 /**
  * Class DiscordAuth
@@ -45,7 +48,7 @@ class DiscordAuth implements AuthProvider {
 	 */
 	public function login( ?string &$key, ?string &$secret, ?string &$authUrl ): bool {
 		$authUrl = $this->provider->getAuthorizationUrl( [
-			'scope' => [ 'identify', 'email' ],
+			'scope' => [ 'identify', 'email', 'guilds' ],
 			'prompt' => 'none'
 		] );
 
@@ -77,13 +80,16 @@ class DiscordAuth implements AuthProvider {
 
 		try {
 			$token = $this->provider->getAccessToken( 'authorization_code', [ 'code' => $_GET['code'] ] );
+			$guilds = $this->getUserGuilds( $token );
+			// TODO: check allowed guilds
+
+			/** @var DiscordResourceOwner $user */
 			$user = $this->provider->getResourceOwner( $token );
-			$userArray = $user->toArray();
 
 			return [
 				'name' => $user->getId(),
-				'realname' => $userArray['username'],
-				'email' => $userArray['email']
+				'realname' => $user->getUsername(),
+				'email' => $user->getEmail()
 			];
 		} catch ( \Exception $e ) {
 			return false;
@@ -95,4 +101,21 @@ class DiscordAuth implements AuthProvider {
 	 */
 	public function saveExtraAttributes( int $id ): void {
 	}
+
+	private function getUserGuildsUrl(): string {
+		return $this->provider->apiDomain . '/users/@me/guilds';
+	}
+
+	/**
+	 * @return array<int, array<string, mixed>>
+	 */
+	private function getUserGuilds( AccessToken $token ): array {
+		$request = $this->provider->getAuthenticatedRequest(
+			AbstractProvider::METHOD_GET, $this->getUserGuildsUrl(),
+			$token
+		);
+
+		return $this->provider->getParsedResponse($request);
+	}
+
 }
