@@ -16,7 +16,10 @@
 
 namespace WSOAuth\AuthenticationProvider;
 
+use GlobalVarConfig;
+use MediaWiki\MediaWikiServices;
 use MediaWiki\User\UserIdentity;
+use MediaWiki\User\UserNameUtils;
 use Wohali\OAuth2\Client\Provider\Discord;
 
 /**
@@ -30,6 +33,16 @@ class DiscordAuth implements AuthProvider {
 	private $provider;
 
 	/**
+	 * @var GlobalVarConfig
+	 */
+	private $config;
+
+	/**
+	 * @var UserNameUtils
+	 */
+	private $userNameUtils;
+
+	/**
 	 * @inheritDoc
 	 */
 	public function __construct( string $clientId, string $clientSecret, ?string $authUri, ?string $redirectUri ) {
@@ -38,6 +51,9 @@ class DiscordAuth implements AuthProvider {
 			'clientSecret' => $clientSecret,
 			'redirectUri' => $redirectUri,
 		] );
+
+		$this->config = new GlobalVarConfig();
+		$this->userNameUtils = MediaWikiServices::getInstance()->getUserNameUtils();
 	}
 
 	/**
@@ -82,7 +98,7 @@ class DiscordAuth implements AuthProvider {
 
 			return [
 				'name' => $user->getId(),
-				'realname' => $userArray['username'],
+				'realname' => $this->getRealName( $user->getId(), $userArray['username'] ),
 				'email' => $userArray['email']
 			];
 		} catch ( \Exception $e ) {
@@ -95,4 +111,26 @@ class DiscordAuth implements AuthProvider {
 	 */
 	public function saveExtraAttributes( int $id ): void {
 	}
+
+	private function getRealName( string $id, string $username ): string {
+		$name = $this->formatRealName( $id, $username );
+
+		if ( !$this->userNameUtils->isValid( $name ) ) {
+			return $id;
+		}
+
+		return $name;
+	}
+
+	private function formatRealName( string $id, string $username ): string {
+		return $this->makeUsernameValid( $username ) . " ($id)";
+	}
+
+	private function makeUsernameValid( string $username ): string {
+		$legal = $this->config->get('LegalTitleChars');
+		$invalid = $this->config->get('InvalidUsernameCharacters');
+		$newUsername = preg_replace( "/([^$legal]|[$invalid]|\/)/", '-', $username );
+		return ucfirst( trim( $newUsername ) );
+	}
+
 }
