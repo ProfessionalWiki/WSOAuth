@@ -3,15 +3,17 @@
 /**
  * Copyright 2020 Marijn van Wezel
  *
- * Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+ * Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated
+ * documentation files (the "Software"), to deal in the Software without restriction, including without limitation the
+ * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to
+ * permit persons to whom the Software is furnished to do so, subject to the following conditions:
  *
- * The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
- * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE
- * OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ * The above copyright notice and this permission notice shall be included in all copies or substantial portions of the
+ * Software. THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT
+ * LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF
+ * CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ * THE SOFTWARE.
  */
 
 namespace WSOAuth;
@@ -20,8 +22,9 @@ use ConfigException;
 use DBError;
 use Exception;
 use Hooks;
-use MediaWiki\Auth\AuthManager;
 use MediaWiki\Extension\PluggableAuth\PluggableAuth;
+use MediaWiki\Session\Session;
+use MediaWiki\Session\SessionManager;
 use MediaWiki\User\UserIdentity;
 use MediaWiki\User\UserNameUtils;
 use RequestContext;
@@ -65,11 +68,6 @@ class WSOAuth extends PluggableAuth {
 	private $userNameUtils;
 
 	/**
-	 * @var AuthManager The current AuthManager instance
-	 */
-	private $authManager;
-
-	/**
 	 * @var bool Whether to disallow remote only accounts
 	 */
 	private $disallowRemoteOnlyAccounts;
@@ -85,14 +83,18 @@ class WSOAuth extends PluggableAuth {
 	private $migrateUsersByUsername;
 
 	/**
+	 * @var Session The current global session
+	 */
+	private $session;
+
+	/**
 	 * WSOAuth constructor.
 	 *
 	 * @param UserNameUtils $userNameUtils
-	 * @param AuthManager $authManager
 	 */
-	public function __construct( UserNameUtils $userNameUtils, AuthManager $authManager ) {
+	public function __construct( UserNameUtils $userNameUtils ) {
 		$this->userNameUtils = $userNameUtils;
-		$this->authManager = $authManager;
+		$this->session = SessionManager::getGlobalSession();
 	}
 
 	/**
@@ -107,6 +109,7 @@ class WSOAuth extends PluggableAuth {
 		}
 
 		$this->authProvider = $this->getAuthProvider( $data['type'], $data );
+		$this->authProvider->setLogger( $this->logger );
 
 		$this->disallowRemoteOnlyAccounts = $this->data['disallowRemoteOnlyAccounts'] ??
 			$GLOBALS['wgOAuthDisallowRemoteOnlyAccounts'];
@@ -141,8 +144,8 @@ class WSOAuth extends PluggableAuth {
 				// Will redirect the user and exit the script if no error occurs
 				$this->initiateLogin();
 			} else {
-				$requestKey = $this->authManager->getAuthenticationSessionData( self::WSOAUTH_OAUTH_REQUEST_KEY_SESSION_KEY );
-				$requestSecret = $this->authManager->getAuthenticationSessionData( self::WSOAUTH_OAUTH_REQUEST_SECRET_SESSION_KEY );
+				$requestKey = $this->session->get( self::WSOAUTH_OAUTH_REQUEST_KEY_SESSION_KEY );
+				$requestSecret = $this->session->get( self::WSOAUTH_OAUTH_REQUEST_SECRET_SESSION_KEY );
 
 				try {
 					// Continue the OAuth login, last part of the 3-logged OAuth login
@@ -155,8 +158,9 @@ class WSOAuth extends PluggableAuth {
 						$email
 					);
 				} finally {
-					$this->authManager->removeAuthenticationSessionData( self::WSOAUTH_OAUTH_REQUEST_KEY_SESSION_KEY );
-					$this->authManager->removeAuthenticationSessionData( self::WSOAUTH_OAUTH_REQUEST_SECRET_SESSION_KEY );
+					$this->session->remove( self::WSOAUTH_OAUTH_REQUEST_KEY_SESSION_KEY );
+					$this->session->remove( self::WSOAUTH_OAUTH_REQUEST_SECRET_SESSION_KEY );
+					$this->session->save();
 				}
 			}
 
@@ -187,9 +191,7 @@ class WSOAuth extends PluggableAuth {
 	 * @internal
 	 */
 	public function saveExtraAttributes( int $id ): void {
-		$remoteUsername = $this->authManager->getAuthenticationSessionData(
-			self::WSOAUTH_REMOTE_USERNAME_SESSION_KEY
-		);
+		$remoteUsername = $this->session->get( self::WSOAUTH_REMOTE_USERNAME_SESSION_KEY );
 
 		if ( $remoteUsername === null ) {
 			throw new FinalisationException( wfMessage( "wsoauth-could-not-create-mapping" )->parse() );
@@ -206,14 +208,17 @@ class WSOAuth extends PluggableAuth {
 	 * @throws InitialisationException
 	 */
 	private function initiateLogin(): void {
+		$this->logger->debug( 'In ' . __METHOD__ );
 		$result = $this->authProvider->login( $key, $secret, $auth_url );
 
 		if ( $result === false || empty( $auth_url ) ) {
+			$this->logger->debug( 'Result empty or no auth URL.' );
 			throw new InitialisationException( wfMessage( 'wsoauth-initiate-login-failure' )->parse() );
 		}
 
-		$this->authManager->setAuthenticationSessionData( self::WSOAUTH_OAUTH_REQUEST_KEY_SESSION_KEY, $key );
-		$this->authManager->setAuthenticationSessionData( self::WSOAUTH_OAUTH_REQUEST_SECRET_SESSION_KEY, $secret );
+		$this->session->set( self::WSOAUTH_OAUTH_REQUEST_KEY_SESSION_KEY, $key );
+		$this->session->set( self::WSOAUTH_OAUTH_REQUEST_SECRET_SESSION_KEY, $secret );
+		$this->session->save();
 
 		// Redirect the user to the second part of the 3-legged OAuth login
 		header( "Location: $auth_url" );
@@ -223,7 +228,7 @@ class WSOAuth extends PluggableAuth {
 	/**
 	 * Last part of 3-legged OAuth. Returns true if the login succeeded, false otherwise.
 	 *
-	 * @param string $key The request key generated by the OAuth provider in the first part
+	 * @param string|null $key The request key generated by the OAuth provider in the first part
 	 * @param string $secret The request secret generated by the OAuth provider in the first part
 	 * @param int|null &$id Set this to the user ID (or NULL to create the user)
 	 * @param string|null &$username Set this to the username
@@ -233,24 +238,27 @@ class WSOAuth extends PluggableAuth {
 	 * @throws ContinuationException|FinalisationException
 	 */
 	private function continueLogin(
-		string $key,
+		?string $key,
 		string $secret,
 		?int &$id,
 		?string &$username,
 		?string &$realname,
 		?string &$email
 	): void {
-		$remoteUserInfo = $this->authProvider->getUser( $key, $secret, $errorMessage );
+		$this->logger->debug( 'In ' . __METHOD__ );
+		$remoteUserInfo = $this->authProvider->getUser( (string)$key, $secret, $errorMessage );
 		$hookResult = Hooks::run( 'WSOAuthAfterGetUser', [ &$remoteUserInfo, &$errorMessage, $this->configId ] );
 
 		if ( $remoteUserInfo === false || $hookResult === false ) {
-			// Request failed or user is not authorised
+			$this->logger->debug( 'Request failed or user is not authorised' );
 			throw new ContinuationException(
 				$errorMessage ?? wfMessage( 'wsoauth-authentication-failure' )->parse()
 			);
 		}
 
-		if ( !isset( $remoteUserInfo['name'] ) || !$this->userNameUtils->isValid( ucfirst( $remoteUserInfo['name'] ) ) ) {
+		if ( !isset( $remoteUserInfo['name'] )
+			|| !$this->userNameUtils->isValid( ucfirst( $remoteUserInfo['name'] ) )
+		) {
 			// Missing or invalid 'name' attribute
 			throw new ContinuationException( wfMessage( 'wsoauth-invalid-username' )->parse() );
 		}
@@ -262,10 +270,8 @@ class WSOAuth extends PluggableAuth {
 		$remoteUsername = ucfirst( $remoteUserInfo['name'] );
 		$localUserId = $this->getLocalAccountID( $remoteUsername );
 
-		$this->authManager->setAuthenticationSessionData(
-			self::WSOAUTH_REMOTE_USERNAME_SESSION_KEY,
-			$remoteUsername
-		);
+		$this->session->set( self::WSOAUTH_REMOTE_USERNAME_SESSION_KEY, $remoteUsername );
+		$this->session->save();
 
 		if ( $localUserId !== 0 ) {
 			// Case 1: A mapping is available from the remote user to a user on the wiki. In this case, we can simply
@@ -355,8 +361,8 @@ class WSOAuth extends PluggableAuth {
 	 * @return bool
 	 */
 	private function isContinuation(): bool {
-		return $this->authManager->getAuthenticationSessionData( self::WSOAUTH_OAUTH_REQUEST_KEY_SESSION_KEY, false ) &&
-			$this->authManager->getAuthenticationSessionData( self::WSOAUTH_OAUTH_REQUEST_SECRET_SESSION_KEY, false );
+		return $this->session->exists( self::WSOAUTH_OAUTH_REQUEST_KEY_SESSION_KEY ) &&
+			$this->session->exists( self::WSOAUTH_OAUTH_REQUEST_SECRET_SESSION_KEY );
 	}
 
 	/**
@@ -419,7 +425,7 @@ class WSOAuth extends PluggableAuth {
 	 *
 	 * @throws UnknownAuthProviderException|InvalidAuthProviderClassException|ConfigException
 	 */
-	private static function getAuthProvider( string $type, array $data ): AuthProvider {
+	private function getAuthProvider( string $type, array $data ): AuthProvider {
 		$auth_providers = self::getAuthProviders();
 
 		if ( !isset( $auth_providers[$type] ) ) {
