@@ -26,7 +26,7 @@ use Wohali\OAuth2\Client\Provider\Discord;
  * Class DiscordAuth
  * @package AuthenticationProvider
  */
-class DiscordAuth implements AuthProvider {
+class DiscordAuth extends AuthProvider {
 	/**
 	 * @var Discord
 	 */
