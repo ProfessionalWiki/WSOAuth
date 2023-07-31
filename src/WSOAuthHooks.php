@@ -18,76 +18,14 @@
 
 namespace WSOAuth;
 
-use Exception;
-use Hooks;
-use MediaWiki\Extension\PluggableAuth\Hook\PluggableAuthPopulateGroups;
-use MediaWiki\Extension\PluggableAuth\PluggableAuthFactory;
 use MediaWiki\Preferences\Hook\GetPreferencesHook;
-use MediaWiki\User\UserGroupManager;
-use MediaWiki\User\UserIdentity;
 use MWException;
 use OOUI\ButtonWidget;
 use RequestContext;
 use SpecialPage;
 use User;
 
-class WSOAuthHooks implements PluggableAuthPopulateGroups, GetPreferencesHook {
-	/**
-	 * @var PluggableAuthFactory
-	 */
-	private $pluggableAuthFactory;
-	/**
-	 * @var UserGroupManager
-	 */
-	private $userGroupManager;
-
-	/**
-	 * @param PluggableAuthFactory $pluggableAuthFactory
-	 * @param UserGroupManager $userGroupManager
-	 */
-	public function __construct(
-		PluggableAuthFactory $pluggableAuthFactory,
-		UserGroupManager $userGroupManager
-	) {
-		$this->pluggableAuthFactory = $pluggableAuthFactory;
-		$this->userGroupManager = $userGroupManager;
-	}
-
-	/**
-	 * Adds the user to the groups defined via $wgOAuthAutoPopulateGroups after authentication.
-	 *
-	 * @param User $user
-	 *
-	 * @throws Exception
-	 * @internal
-	 */
-	public function onPluggableAuthPopulateGroups( UserIdentity $user ): void {
-		$currentPlugin = $this->pluggableAuthFactory->getInstance();
-		if ( !( $currentPlugin instanceof WSOAuth ) ) {
-			// We can only sync groups in the context of a WSOAuth authentication flow,
-			// not for arbitrary other plugins
-			return;
-		}
-
-		$result = Hooks::run( 'WSOAuthBeforeAutoPopulateGroups', [ &$user ] );
-
-		if ( $result === false ) {
-			return;
-		}
-
-		if ( !isset( $GLOBALS['wgOAuthAutoPopulateGroups'] ) ) {
-			return;
-		}
-
-		$populateGroups = array_diff(
-			(array)$GLOBALS['wgOAuthAutoPopulateGroups'],
-			$this->userGroupManager->getUserEffectiveGroups( $user )
-		);
-
-		foreach ( $populateGroups as $group ) {
-			$this->userGroupManager->addUserToGroup( $user, $group );
-		}
-	}
+class WSOAuthHooks implements GetPreferencesHook {
 
 	/**
 	 * Modify user preferences.

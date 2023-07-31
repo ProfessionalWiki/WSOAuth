@@ -18,11 +18,13 @@
 
 namespace WSOAuth;
 
+use Config;
 use ConfigException;
 use DBError;
 use Exception;
-use Hooks;
 use MediaWiki\Extension\PluggableAuth\PluggableAuth;
+use MediaWiki\HookContainer\HookContainer;
+use MediaWiki\MediaWikiServices;
 use MediaWiki\Session\Session;
 use MediaWiki\Session\SessionManager;
 use MediaWiki\User\UserIdentity;
@@ -58,6 +60,12 @@ class WSOAuth extends PluggableAuth {
 	];
 
 	/**
+	 * @var array The groups to populate
+	 * @public Must be accessible from WSOAuthHooks
+	 */
+	public $autoPopulateGroups;
+
+	/**
 	 * @var AuthProvider|null The requested authentication provider
 	 */
 	private $authProvider;
@@ -66,6 +74,10 @@ class WSOAuth extends PluggableAuth {
 	 * @var UserNameUtils The UserNameUtils service
 	 */
 	private $userNameUtils;
+	/**
+	 * @var HookContainer
+	 */
+	private $hookContainer;
 
 	/**
 	 * @var bool Whether to disallow remote only accounts
@@ -90,10 +102,18 @@ class WSOAuth extends PluggableAuth {
 	/**
 	 * WSOAuth constructor.
 	 *
+	 * @param Config $mainConfig
 	 * @param UserNameUtils $userNameUtils
+	 * @param HookContainer $hookContainer
 	 */
-	public function __construct( UserNameUtils $userNameUtils ) {
+	public function __construct(
+		Config $mainConfig,
+		UserNameUtils $userNameUtils,
+		HookContainer $hookContainer
+	) {
+		$this->mainConfig = $mainConfig;
 		$this->userNameUtils = $userNameUtils;
+		$this->hookContainer = $hookContainer;
 		$this->session = SessionManager::getGlobalSession();
 	}
 
@@ -101,24 +121,29 @@ class WSOAuth extends PluggableAuth {
 	 * @inheritDoc
 	 * @throws UnknownAuthProviderException|InvalidAuthProviderClassException|ConfigException
 	 */
-	public function init( string $configId, ?array $data ) {
-		parent::init( $configId, $data );
+	public function init( string $configId, array $config ) {
+		parent::init( $configId, $config );
 
-		if ( !isset( $data['type'] ) ) {
+		if ( !$this->getData()->has( 'type' ) ) {
 			throw new ConfigException( wfMessage( "wsoauth-not-configured-message" )->parse() );
 		}
 
-		$this->authProvider = $this->getAuthProvider( $data['type'], $data );
-		$this->authProvider->setLogger( $this->logger );
+		$this->authProvider = $this->getAuthProvider( $this->getData()->get( 'type' ), $config['data'] );
+		$this->authProvider->setLogger( $this->getLogger() );
 
-		$this->disallowRemoteOnlyAccounts = $this->data['disallowRemoteOnlyAccounts'] ??
-			$GLOBALS['wgOAuthDisallowRemoteOnlyAccounts'];
+		$this->disallowRemoteOnlyAccounts = $this->getConfigValue( 'DisallowRemoteOnlyAccounts' );
+		$this->useRealNameAsUsername = $this->getConfigValue( 'UseRealNameAsUsername' );
+		$this->migrateUsersByUsername = $this->getConfigValue( 'MigrateUsersByUsername' );
+		$this->autoPopulateGroups = $this->getConfigValue( 'AutoPopulateGroups' );
+	}
 
-		$this->useRealNameAsUsername = $this->data['useRealNameAsUsername'] ??
-			$GLOBALS['wgOAuthUseRealNameAsUsername'];
-
-		$this->migrateUsersByUsername = $this->data['migrateUsersByUsername'] ??
-			$GLOBALS['wgOAuthMigrateUsersByUsername'];
+	/**
+	 * @param string $name
+	 * @return mixed
+	 */
+	private function getConfigValue( string $name ) {
+		return $this->getData()->has( $name ) ? $this->getData()->get( $name ) :
+			$this->mainConfig->get( 'OAuth' . $name );
 	}
 
 	/**
@@ -180,7 +205,7 @@ class WSOAuth extends PluggableAuth {
 	 * @internal
 	 */
 	public function deauthenticate( UserIdentity &$user ): void {
-		Hooks::run( 'WSOAuthBeforeLogout', [ &$user ] );
+		$this->hookContainer->run( 'WSOAuthBeforeLogout', [ &$user ] );
 		$this->authProvider->logout( $user );
 	}
 
@@ -202,17 +227,33 @@ class WSOAuth extends PluggableAuth {
 	}
 
 	/**
+	 * Adds the user to the groups defined via $wgOAuthAutoPopulateGroups after authentication.
+	 * @param UserIdentity $user
+	 * @return array
+	 * @throws Exception
+	 */
+	public function getAttributes( UserIdentity $user ): array {
+		$result = $this->hookContainer->run( 'WSOAuthBeforeAutoPopulateGroups', [ &$user ] );
+
+		if ( $result === false ) {
+			return [];
+		}
+
+		return $this->autoPopulateGroups;
+	}
+
+	/**
 	 * First part of 3-legged OAuth login. In this part we retrieve the request token and redirect the user to the
 	 * authentication provider.
 	 *
 	 * @throws InitialisationException
 	 */
 	private function initiateLogin(): void {
-		$this->logger->debug( 'In ' . __METHOD__ );
+		$this->getLogger()->debug( 'In ' . __METHOD__ );
 		$result = $this->authProvider->login( $key, $secret, $auth_url );
 
 		if ( $result === false || empty( $auth_url ) ) {
-			$this->logger->debug( 'Result empty or no auth URL.' );
+			$this->getLogger()->debug( 'Result empty or no auth URL.' );
 			throw new InitialisationException( wfMessage( 'wsoauth-initiate-login-failure' )->parse() );
 		}
 
@@ -245,12 +286,13 @@ class WSOAuth extends PluggableAuth {
 		?string &$realname,
 		?string &$email
 	): void {
-		$this->logger->debug( 'In ' . __METHOD__ );
+		$this->getLogger()->debug( 'In ' . __METHOD__ );
 		$remoteUserInfo = $this->authProvider->getUser( (string)$key, $secret, $errorMessage );
-		$hookResult = Hooks::run( 'WSOAuthAfterGetUser', [ &$remoteUserInfo, &$errorMessage, $this->configId ] );
+		$hookResult = $this->hookContainer->run( 'WSOAuthAfterGetUser',
+			[ &$remoteUserInfo, &$errorMessage, $this->getConfigId() ] );
 
 		if ( $remoteUserInfo === false || $hookResult === false ) {
-			$this->logger->debug( 'Request failed or user is not authorised' );
+			$this->getLogger()->debug( 'Request failed or user is not authorised' );
 			throw new ContinuationException(
 				$errorMessage ?? wfMessage( 'wsoauth-authentication-failure' )->parse()
 			);
@@ -327,7 +369,7 @@ class WSOAuth extends PluggableAuth {
 			[
 				'wsoauth_user' => $localUserID,
 				'wsoauth_remote_name' => $remoteAccountName,
-				'wsoauth_provider_id' => $this->configId
+				'wsoauth_provider_id' => $this->getConfigId()
 			],
 			__METHOD__
 		);
@@ -343,7 +385,7 @@ class WSOAuth extends PluggableAuth {
 		$results = wfGetDB( DB_PRIMARY )->select(
 			self::MAPPING_TABLE_NAME,
 			[ 'wsoauth_user' ],
-			[ 'wsoauth_remote_name' => $name, 'wsoauth_provider_id' => $this->configId ],
+			[ 'wsoauth_remote_name' => $name, 'wsoauth_provider_id' => $this->getConfigId() ],
 			__METHOD__
 		);
 
@@ -409,7 +451,8 @@ class WSOAuth extends PluggableAuth {
 		$auth_providers = self::DEFAULT_AUTH_PROVIDERS;
 
 		try {
-			Hooks::run( "WSOAuthGetAuthProviders", [ &$auth_providers ] );
+			MediaWikiServices::getInstance()->getHookContainer()
+				->run( "WSOAuthGetAuthProviders", [ &$auth_providers ] );
 		} catch ( Exception $exception ) {
 		}
 
@@ -452,7 +495,8 @@ class WSOAuth extends PluggableAuth {
 			$data['clientId'],
 			$data['clientSecret'],
 			$data['uri'] ?? null,
-			$data['redirectUri'] ?? null
+			$data['redirectUri'] ?? null,
+			$data['extensionData'] ?? []
 		);
 	}
 }
